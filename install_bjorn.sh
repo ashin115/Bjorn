@@ -1,9 +1,11 @@
 #!/bin/bash
 
 # BJORN Installation Script
-# This script handles the complete installation of BJORN
+# Supports first install (interactive), update, and reinstall workflows.
 # Author: infinition
-# Version: 1.0 - 071124 - 0954
+# Version: 2.0 - 260323
+
+set -u
 
 # Colors for output
 RED='\033[0;31m'
@@ -21,14 +23,21 @@ VERBOSE=false
 # Global variables
 BJORN_USER="bjorn"
 BJORN_PATH="/home/${BJORN_USER}/Bjorn"
+CONFIG_FILE_REL="config/shared_config.json"
 CURRENT_STEP=0
 TOTAL_STEPS=8
 
-if [[ "$1" == "--help" ]]; then
-    echo "Usage: sudo ./install_bjorn.sh"
-    echo "Make sure you have the necessary permissions and that all dependencies are met."
-    exit 0
-fi
+# Mode and flags
+MODE="interactive" # interactive|update|reinstall
+FULL_SYSTEM=false
+AUTO_YES=false
+REPO_URL="https://github.com/ashin115/Bjorn.git"
+BRANCH="main"
+EPD_VERSION=""
+
+# Runtime paths
+BACKUP_DIR="/tmp/bjorn_install_${RANDOM}_$$"
+CONFIG_BACKUP_FILE="${BACKUP_DIR}/shared_config.json.bak"
 
 # Function to display progress
 show_progress() {
@@ -52,12 +61,41 @@ log() {
     fi
 }
 
+print_help() {
+    cat << EOF
+Usage:
+  sudo ./install_bjorn.sh                         # Interactive first install (existing behavior)
+  sudo ./install_bjorn.sh --update [options]      # Day-2 update
+  sudo ./install_bjorn.sh --reinstall [options]   # Day-2 reinstall with rollback
+
+Options:
+  --update               Update existing installation (preserves config)
+  --reinstall            Reinstall code directory (preserves config, rollback on clone failure)
+  --full-system          Re-run system-level setup (deps, limits, interfaces, USB gadget)
+    --repo <url>           Git repository URL (default: https://github.com/ashin115/Bjorn.git)
+  --branch <name>        Git branch to deploy (default: main)
+  --yes                  Non-interactive mode (assume yes)
+  --epd <value>          E-paper value (epd2in13, epd2in13_V2, epd2in13_V3, epd2in13_V4, epd2in7)
+  --help                 Show this help
+
+Examples:
+  sudo ./install_bjorn.sh
+  sudo ./install_bjorn.sh --update --yes
+  sudo ./install_bjorn.sh --reinstall --repo https://github.com/<you>/Bjorn.git --branch main --yes
+  sudo ./install_bjorn.sh --update --full-system --yes --epd epd2in13_V4
+EOF
+}
+
 # Error handling function
 handle_error() {
     local error_code=$?
     local error_message=$1
     log "ERROR" "An error occurred during: $error_message (Error code: $error_code)"
     log "ERROR" "Check the log file for details: $LOG_FILE"
+
+    if [ "$AUTO_YES" = true ] || [ "$MODE" != "interactive" ]; then
+        clean_exit 1
+    fi
 
     echo -e "\n${RED}Would you like to:"
     echo "1. Retry this step"
@@ -66,10 +104,10 @@ handle_error() {
     read -r choice
 
     case $choice in
-        1) return 1 ;; # Retry
-        2) return 0 ;; # Skip
-        3) clean_exit 1 ;; # Exit
-        *) handle_error "$error_message" ;; # Invalid choice
+        1) return 1 ;;
+        2) return 0 ;;
+        3) clean_exit 1 ;;
+        *) handle_error "$error_message" ;;
     esac
 }
 
@@ -84,74 +122,210 @@ check_success() {
     fi
 }
 
-# # Check system compatibility
-# check_system_compatibility() {
-#     log "INFO" "Checking system compatibility..."
-    
-#     # Check if running on Raspberry Pi
-#     if ! grep -q "Raspberry Pi" /proc/cpuinfo; then
-#         log "WARNING" "This system might not be a Raspberry Pi. Continue anyway? (y/n)"
-#         read -r response
-#         if [[ ! "$response" =~ ^[Yy]$ ]]; then
-#             clean_exit 1
-#         fi
-#     fi
-    
-#     check_success "System compatibility check completed"
-# }
+require_root() {
+    if [ "$(id -u)" -ne 0 ]; then
+        echo "This script must be run as root. Please use 'sudo'."
+        exit 1
+    fi
+}
+
+ask_yes_no() {
+    local prompt="$1"
+    if [ "$AUTO_YES" = true ]; then
+        return 0
+    fi
+
+    while true; do
+        read -r -p "$prompt (y/n): " response
+        case "$response" in
+            [Yy]) return 0 ;;
+            [Nn]) return 1 ;;
+            *) echo "Please answer y or n." ;;
+        esac
+    done
+}
+
+ensure_line_in_file() {
+    local file="$1"
+    local line="$2"
+
+    [ -f "$file" ] || touch "$file"
+    if ! grep -Fqx "$line" "$file"; then
+        echo "$line" >> "$file"
+    fi
+}
+
+set_key_value_line() {
+    local file="$1"
+    local key="$2"
+    local value="$3"
+
+    [ -f "$file" ] || touch "$file"
+    if grep -Eq "^#?${key}=" "$file"; then
+        sed -i "s|^#\?${key}=.*|${key}=${value}|" "$file"
+    else
+        echo "${key}=${value}" >> "$file"
+    fi
+}
+
+backup_shared_config() {
+    local config_path="${BJORN_PATH}/${CONFIG_FILE_REL}"
+    mkdir -p "$BACKUP_DIR"
+
+    if [ -f "$config_path" ]; then
+        cp "$config_path" "$CONFIG_BACKUP_FILE"
+        check_success "Backed up shared config"
+    else
+        log "WARNING" "No existing shared config found to back up"
+    fi
+}
+
+restore_shared_config() {
+    local config_path="${BJORN_PATH}/${CONFIG_FILE_REL}"
+
+    if [ -f "$CONFIG_BACKUP_FILE" ]; then
+        mkdir -p "$(dirname "$config_path")"
+        cp "$CONFIG_BACKUP_FILE" "$config_path"
+        check_success "Restored shared config"
+    fi
+
+    if [ -n "$EPD_VERSION" ] && [ -f "$config_path" ]; then
+        sed -i "s/\"epd_type\": \"[^\"]*\"/\"epd_type\": \"$EPD_VERSION\"/" "$config_path"
+        check_success "Applied E-Paper display configuration: $EPD_VERSION"
+    fi
+}
+
+ensure_bjorn_user() {
+    if ! id -u "$BJORN_USER" >/dev/null 2>&1; then
+        adduser --disabled-password --gecos "" "$BJORN_USER"
+        check_success "Created BJORN user"
+    fi
+}
+
+stop_bjorn_runtime() {
+    log "INFO" "Stopping BJORN runtime if active..."
+
+    if systemctl list-unit-files | grep -q '^bjorn\.service'; then
+        systemctl stop bjorn.service >/dev/null 2>&1 || true
+    fi
+
+    pkill -f "python3 /home/bjorn/Bjorn/Bjorn.py" >/dev/null 2>&1 || true
+    check_success "Stopped BJORN runtime"
+}
+
+clone_repo_to_path() {
+    local target_path="$1"
+    git clone --branch "$BRANCH" "$REPO_URL" "$target_path"
+}
+
+refresh_repo_from_git() {
+    if [ ! -d "${BJORN_PATH}/.git" ]; then
+        return 1
+    fi
+
+    git -C "$BJORN_PATH" remote set-url origin "$REPO_URL"
+    git -C "$BJORN_PATH" fetch --prune origin "$BRANCH"
+    git -C "$BJORN_PATH" checkout -B "$BRANCH" "origin/$BRANCH"
+}
+
+reclone_with_rollback() {
+    local rollback_path="${BJORN_PATH}.rollback.$(date +%s)"
+
+    if [ -d "$BJORN_PATH" ]; then
+        mv "$BJORN_PATH" "$rollback_path"
+        check_success "Moved current Bjorn directory to rollback path"
+    fi
+
+    if clone_repo_to_path "$BJORN_PATH"; then
+        rm -rf "$rollback_path"
+        log "SUCCESS" "Repository cloned successfully"
+        return 0
+    fi
+
+    log "ERROR" "Clone failed, attempting rollback"
+    rm -rf "$BJORN_PATH"
+
+    if [ -d "$rollback_path" ]; then
+        mv "$rollback_path" "$BJORN_PATH"
+        check_success "Rollback restored previous Bjorn directory"
+    fi
+
+    return 1
+}
+
+prepare_repo_install_mode() {
+    cd "/home/$BJORN_USER" || return 1
+
+    if [ -d "$BJORN_PATH" ]; then
+        log "INFO" "Using existing BJORN directory"
+        return 0
+    fi
+
+    clone_repo_to_path "$BJORN_PATH"
+    check_success "Cloned BJORN repository"
+}
+
+prepare_repo_update_mode() {
+    if [ ! -d "$BJORN_PATH" ]; then
+        log "WARNING" "Bjorn directory not found, cloning from scratch"
+        clone_repo_to_path "$BJORN_PATH"
+        check_success "Cloned BJORN repository"
+        return 0
+    fi
+
+    if refresh_repo_from_git; then
+        check_success "Updated repository from git"
+        return 0
+    fi
+
+    log "WARNING" "Git metadata missing or refresh failed, falling back to rollback-safe reclone"
+    reclone_with_rollback
+    check_success "Recloned repository with rollback safety"
+}
+
+prepare_repo_reinstall_mode() {
+    reclone_with_rollback
+    check_success "Reinstalled repository with rollback safety"
+}
+
 # Check system compatibility
 check_system_compatibility() {
     log "INFO" "Checking system compatibility..."
     local should_ask_confirmation=false
-    
-    # Check if running on Raspberry Pi
+
     if ! grep -q "Raspberry Pi" /proc/cpuinfo; then
         log "WARNING" "This system might not be a Raspberry Pi"
         should_ask_confirmation=true
     fi
 
-    # Check RAM (Raspberry Pi Zero has 512MB RAM)
     total_ram=$(free -m | awk '/^Mem:/{print $2}')
     if [ "$total_ram" -lt 410 ]; then
         log "WARNING" "Low RAM detected. Required: 512MB (410 With OS Running), Found: ${total_ram}MB"
-        echo -e "${YELLOW}Your system has less RAM than recommended. This might affect performance, but you can continue.${NC}"
         should_ask_confirmation=true
     else
         log "SUCCESS" "RAM check passed: ${total_ram}MB available"
     fi
 
-    # Check available disk space
     available_space=$(df -m /home | awk 'NR==2 {print $4}')
     if [ "$available_space" -lt 2048 ]; then
         log "WARNING" "Low disk space. Recommended: 1GB, Found: ${available_space}MB"
-        echo -e "${YELLOW}Your system has less free space than recommended. This might affect installation.${NC}"
         should_ask_confirmation=true
     else
         log "SUCCESS" "Disk space check passed: ${available_space}MB available"
     fi
 
-    # Check OS version
     if [ -f "/etc/os-release" ]; then
+        # shellcheck source=/dev/null
         source /etc/os-release
-        
-        # Verify if it's Raspbian
+
         if [ "$NAME" != "Raspbian GNU/Linux" ]; then
             log "WARNING" "Different OS detected. Recommended: Raspbian GNU/Linux, Found: ${NAME}"
-            echo -e "${YELLOW}Your system is not running Raspbian GNU/Linux.${NC}"
             should_ask_confirmation=true
         fi
-        
-        # Compare versions (expecting Bookworm = 12)
+
         expected_version="12"
         if [ "$VERSION_ID" != "$expected_version" ]; then
             log "WARNING" "Different OS version detected"
-            echo -e "${YELLOW}This script was tested with Raspbian GNU/Linux 12 (bookworm)${NC}"
-            echo -e "${YELLOW}Current system: ${PRETTY_NAME}${NC}"
-            if [ "$VERSION_ID" -lt "$expected_version" ]; then
-                echo -e "${YELLOW}Your system version ($VERSION_ID) is older than recommended ($expected_version)${NC}"
-            elif [ "$VERSION_ID" -gt "$expected_version" ]; then
-                echo -e "${YELLOW}Your system version ($VERSION_ID) is newer than tested ($expected_version)${NC}"
-            fi
             should_ask_confirmation=true
         else
             log "SUCCESS" "OS version check passed: ${PRETTY_NAME}"
@@ -161,50 +335,37 @@ check_system_compatibility() {
         should_ask_confirmation=true
     fi
 
-    # Check if system is 32-bit ARM (armhf)
     architecture=$(dpkg --print-architecture)
     if [ "$architecture" != "armhf" ]; then
         log "WARNING" "Different architecture detected. Expected: armhf, Found: ${architecture}"
-        echo -e "${YELLOW}This script was tested with armhf architecture${NC}"
         should_ask_confirmation=true
     fi
-    
-    # Additional Pi Zero specific checks if possible
+
     if ! (grep -q "Pi Zero" /proc/cpuinfo || grep -q "BCM2835" /proc/cpuinfo); then
         log "WARNING" "Could not confirm if this is a Raspberry Pi Zero"
-        echo -e "${YELLOW}This script was designed for Raspberry Pi Zero${NC}"
         should_ask_confirmation=true
     else
         log "SUCCESS" "Raspberry Pi Zero detected"
     fi
 
-    if [ "$should_ask_confirmation" = true ]; then
-        echo -e "\n${YELLOW}Some system compatibility warnings were detected (see above).${NC}"
-        echo -e "${YELLOW}The installation might not work as expected.${NC}"
-        echo -e "${YELLOW}Do you want to continue anyway? (y/n)${NC}"
-        read -r response
-        if [[ ! "$response" =~ ^[Yy]$ ]]; then
+    if [ "$should_ask_confirmation" = true ] && [ "$AUTO_YES" = false ]; then
+        echo -e "\n${YELLOW}Some system compatibility warnings were detected.${NC}"
+        if ! ask_yes_no "Do you want to continue anyway?"; then
             log "INFO" "Installation aborted by user after compatibility warnings"
             clean_exit 1
         fi
-    else
-        log "SUCCESS" "All compatibility checks passed"
     fi
 
     log "INFO" "System compatibility check completed"
     return 0
 }
 
-
-
 # Install system dependencies
 install_dependencies() {
     log "INFO" "Installing system dependencies..."
-    
-    # Update package list
+
     apt-get update
-    
-    # List of required packages based on README
+
     packages=(
         "python3-pip"
         "wget"
@@ -229,45 +390,35 @@ install_dependencies() {
         "libatlas-base-dev"
         "build-essential"
     )
-    
-    # Install packages
+
     for package in "${packages[@]}"; do
         log "INFO" "Installing $package..."
         apt-get install -y "$package"
         check_success "Installed $package"
     done
-    
-    # Update nmap scripts
+
     nmap --script-updatedb
     check_success "Dependencies installation completed"
 }
 
-# Configure system limits
+# Configure system limits (idempotent)
 configure_system_limits() {
     log "INFO" "Configuring system limits..."
 
-    # Configure /etc/security/limits.conf
-    cat >> /etc/security/limits.conf << EOF
-* soft nofile 65535
-* hard nofile 65535
-root soft nofile 65535
-root hard nofile 65535
-EOF
+    ensure_line_in_file /etc/security/limits.conf "* soft nofile 65535"
+    ensure_line_in_file /etc/security/limits.conf "* hard nofile 65535"
+    ensure_line_in_file /etc/security/limits.conf "root soft nofile 65535"
+    ensure_line_in_file /etc/security/limits.conf "root hard nofile 65535"
 
-    # Configure systemd limits
-    sed -i '/^#DefaultLimitNOFILE=/d' /etc/systemd/system.conf
-    echo "DefaultLimitNOFILE=65535" >> /etc/systemd/system.conf
-    sed -i '/^#DefaultLimitNOFILE=/d' /etc/systemd/user.conf
-    echo "DefaultLimitNOFILE=65535" >> /etc/systemd/user.conf
+    set_key_value_line /etc/systemd/system.conf "DefaultLimitNOFILE" "65535"
+    set_key_value_line /etc/systemd/user.conf "DefaultLimitNOFILE" "65535"
 
-    # Create /etc/security/limits.d/90-nofile.conf
     cat > /etc/security/limits.d/90-nofile.conf << EOF
 root soft nofile 65535
 root hard nofile 65535
 EOF
 
-    # Configure sysctl
-    echo "fs.file-max = 2097152" >> /etc/sysctl.conf
+    set_key_value_line /etc/sysctl.conf "fs.file-max" "2097152"
     sysctl -p
 
     check_success "System limits configuration completed"
@@ -276,70 +427,51 @@ EOF
 # Configure SPI and I2C
 configure_interfaces() {
     log "INFO" "Configuring SPI and I2C interfaces..."
-    
-    # Enable SPI and I2C using raspi-config
+
     raspi-config nonint do_spi 0
     raspi-config nonint do_i2c 0
-    
+
     check_success "Interface configuration completed"
 }
 
-# Setup BJORN
-setup_bjorn() {
-    log "INFO" "Setting up BJORN..."
-    
-    # Create BJORN user if it doesn't exist
-    if ! id -u $BJORN_USER >/dev/null 2>&1; then
-        adduser --disabled-password --gecos "" $BJORN_USER
-        check_success "Created BJORN user"
-    fi
+# Setup BJORN app files
+setup_bjorn_app() {
+    log "INFO" "Setting up BJORN application..."
 
-    # Check for existing BJORN directory
-    cd /home/$BJORN_USER
-    if [ -d "Bjorn" ]; then
-        log "INFO" "Using existing BJORN directory"
-        echo -e "${GREEN}Using existing BJORN directory${NC}"
-    else
-        # No existing directory, proceed with clone
-        log "INFO" "Cloning BJORN repository"
-        git clone https://github.com/infinition/Bjorn.git
-        check_success "Cloned BJORN repository"
-    fi
+    ensure_bjorn_user
 
-    cd Bjorn
+    case "$MODE" in
+        interactive)
+            prepare_repo_install_mode
+            ;;
+        update)
+            prepare_repo_update_mode
+            ;;
+        reinstall)
+            prepare_repo_reinstall_mode
+            ;;
+    esac
 
-    # Update the shared_config.json file with the selected EPD version
-    log "INFO" "Updating E-Paper display configuration..."
-    if [ -f "config/shared_config.json" ]; then
-        sed -i "s/\"epd_type\": \"[^\"]*\"/\"epd_type\": \"$EPD_VERSION\"/" config/shared_config.json
-        check_success "Updated E-Paper display configuration to $EPD_VERSION"
-    else
-        log "ERROR" "Configuration file not found: config/shared_config.json"
-        handle_error "E-Paper display configuration update"
-    fi
+    restore_shared_config
 
-    # Install requirements with --break-system-packages flag
+    cd "$BJORN_PATH" || return 1
+
     log "INFO" "Installing Python requirements..."
-    
     pip3 install -r requirements.txt --break-system-packages
     check_success "Installed Python requirements"
 
-    # Set correct permissions
-    chown -R $BJORN_USER:$BJORN_USER /home/$BJORN_USER/Bjorn
-    chmod -R 755 /home/$BJORN_USER/Bjorn
-    
-    # Add bjorn user to necessary groups
-    usermod -a -G spi,gpio,i2c $BJORN_USER
+    chown -R "$BJORN_USER:$BJORN_USER" "$BJORN_PATH"
+    chmod -R 755 "$BJORN_PATH"
+
+    usermod -a -G spi,gpio,i2c "$BJORN_USER"
     check_success "Added bjorn user to required groups"
 }
 
-
-# Configure services
+# Configure services (idempotent)
 setup_services() {
     log "INFO" "Setting up system services..."
-    
-    # Create kill_port_8000.sh script
-    cat > $BJORN_PATH/kill_port_8000.sh << 'EOF'
+
+    cat > "$BJORN_PATH/kill_port_8000.sh" << 'EOF'
 #!/bin/bash
 PORT=8000
 PIDS=$(lsof -t -i:$PORT)
@@ -348,9 +480,8 @@ if [ -n "$PIDS" ]; then
     kill -9 $PIDS
 fi
 EOF
-    chmod +x $BJORN_PATH/kill_port_8000.sh
+    chmod +x "$BJORN_PATH/kill_port_8000.sh"
 
-    # Create BJORN service
     cat > /etc/systemd/system/bjorn.service << EOF
 [Unit]
 Description=Bjorn Service
@@ -374,28 +505,26 @@ ExecStartPost=/bin/bash -c 'FILE_LIMIT=\$(ulimit -n); THRESHOLD=\$(( FILE_LIMIT 
 WantedBy=multi-user.target
 EOF
 
-    # Configure PAM
-    echo "session required pam_limits.so" >> /etc/pam.d/common-session
-    echo "session required pam_limits.so" >> /etc/pam.d/common-session-noninteractive
+    ensure_line_in_file /etc/pam.d/common-session "session required pam_limits.so"
+    ensure_line_in_file /etc/pam.d/common-session-noninteractive "session required pam_limits.so"
 
-    # Enable and start services
     systemctl daemon-reload
     systemctl enable bjorn.service
+    systemctl restart bjorn.service
 
     check_success "Services setup completed"
 }
 
-# Configure USB Gadget
+# Configure USB Gadget (idempotent)
 configure_usb_gadget() {
     log "INFO" "Configuring USB Gadget..."
 
-    # Modify cmdline.txt
-    sed -i 's/rootwait/rootwait modules-load=dwc2,g_ether/' /boot/firmware/cmdline.txt
+    if [ -f /boot/firmware/cmdline.txt ] && ! grep -q 'modules-load=dwc2,g_ether' /boot/firmware/cmdline.txt; then
+        sed -i 's/rootwait/rootwait modules-load=dwc2,g_ether/' /boot/firmware/cmdline.txt
+    fi
 
-    # Modify config.txt
-    echo "dtoverlay=dwc2" >> /boot/firmware/config.txt
+    ensure_line_in_file /boot/firmware/config.txt "dtoverlay=dwc2"
 
-    # Create USB gadget script
     cat > /usr/local/bin/usb-gadget.sh << 'EOF'
 #!/bin/bash
 set -e
@@ -447,7 +576,6 @@ EOF
 
     chmod +x /usr/local/bin/usb-gadget.sh
 
-    # Create USB gadget service
     cat > /etc/systemd/system/usb-gadget.service << EOF
 [Unit]
 Description=USB Gadget Service
@@ -463,16 +591,16 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 EOF
 
-    # Configure network interface
-    cat >> /etc/network/interfaces << EOF
+    if ! grep -q '^allow-hotplug usb0$' /etc/network/interfaces; then
+        cat >> /etc/network/interfaces << EOF
 
 allow-hotplug usb0
 iface usb0 inet static
     address 172.20.2.1
     netmask 255.255.255.0
 EOF
+    fi
 
-    # Enable and start services
     systemctl daemon-reload
     systemctl enable systemd-networkd
     systemctl enable usb-gadget
@@ -485,17 +613,15 @@ EOF
 # Verify installation
 verify_installation() {
     log "INFO" "Verifying installation..."
-    
-    # Check if services are running
+
     if ! systemctl is-active --quiet bjorn.service; then
         log "WARNING" "BJORN service is not running"
     else
         log "SUCCESS" "BJORN service is running"
     fi
-    
-    # Check web interface
+
     sleep 5
-    if curl -s http://localhost:8000 > /dev/null; then
+    if curl -s http://localhost:8000 >/dev/null; then
         log "SUCCESS" "Web interface is accessible"
     else
         log "WARNING" "Web interface is not responding"
@@ -505,6 +631,9 @@ verify_installation() {
 # Clean exit function
 clean_exit() {
     local exit_code=$1
+
+    rm -rf "$BACKUP_DIR"
+
     if [ $exit_code -eq 0 ]; then
         log "SUCCESS" "BJORN installation completed successfully!"
         log "INFO" "Log file available at: $LOG_FILE"
@@ -512,65 +641,126 @@ clean_exit() {
         log "ERROR" "BJORN installation failed!"
         log "ERROR" "Check the log file for details: $LOG_FILE"
     fi
+
     exit $exit_code
 }
 
-# Main installation process
-main() {
-    log "INFO" "Starting BJORN installation..."
-
-    # Check if script is run as root
-    if [ "$(id -u)" -ne 0 ]; then
-        echo "This script must be run as root. Please use 'sudo'."
-        exit 1
-    fi
-
-    echo -e "${BLUE}BJORN Installation Options:${NC}"
-    echo "1. Full installation (recommended)"
-    echo "2. Custom installation"
-    read -p "Choose an option (1/2): " install_option
-
-    # E-Paper Display Selection
+choose_epd_interactive() {
     echo -e "\n${BLUE}Please select your E-Paper Display version:${NC}"
     echo "1. epd2in13"
     echo "2. epd2in13_V2"
     echo "3. epd2in13_V3"
     echo "4. epd2in13_V4"
     echo "5. epd2in7"
-    
+
     while true; do
-        read -p "Enter your choice (1-4): " epd_choice
+        read -r -p "Enter your choice (1-5): " epd_choice
         case $epd_choice in
-            1) EPD_VERSION="epd2in13"; break;;
-            2) EPD_VERSION="epd2in13_V2"; break;;
-            3) EPD_VERSION="epd2in13_V3"; break;;
-            4) EPD_VERSION="epd2in13_V4"; break;;
-            5) EPD_VERSION="epd2in7"; break;;
-            *) echo -e "${RED}Invalid choice. Please select 1-5.${NC}";;
+            1) EPD_VERSION="epd2in13"; break ;;
+            2) EPD_VERSION="epd2in13_V2"; break ;;
+            3) EPD_VERSION="epd2in13_V3"; break ;;
+            4) EPD_VERSION="epd2in13_V4"; break ;;
+            5) EPD_VERSION="epd2in7"; break ;;
+            *) echo -e "${RED}Invalid choice. Please select 1-5.${NC}" ;;
         esac
     done
 
     log "INFO" "Selected E-Paper Display version: $EPD_VERSION"
+}
+
+parse_args() {
+    if [ $# -eq 0 ]; then
+        MODE="interactive"
+        return 0
+    fi
+
+    MODE=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --help)
+                print_help
+                exit 0
+                ;;
+            --update)
+                MODE="update"
+                ;;
+            --reinstall)
+                MODE="reinstall"
+                ;;
+            --full-system)
+                FULL_SYSTEM=true
+                ;;
+            --repo)
+                shift
+                [ $# -gt 0 ] || { echo "Missing value for --repo"; exit 1; }
+                REPO_URL="$1"
+                ;;
+            --branch)
+                shift
+                [ $# -gt 0 ] || { echo "Missing value for --branch"; exit 1; }
+                BRANCH="$1"
+                ;;
+            --yes)
+                AUTO_YES=true
+                ;;
+            --epd)
+                shift
+                [ $# -gt 0 ] || { echo "Missing value for --epd"; exit 1; }
+                EPD_VERSION="$1"
+                ;;
+            *)
+                echo "Unknown option: $1"
+                print_help
+                exit 1
+                ;;
+        esac
+        shift
+    done
+
+    if [ -z "$MODE" ]; then
+        echo "Non-interactive mode requires --update or --reinstall."
+        print_help
+        exit 1
+    fi
+}
+
+run_full_system_stack() {
+    CURRENT_STEP=$((CURRENT_STEP + 1)); show_progress "Checking system compatibility"
+    check_system_compatibility
+
+    CURRENT_STEP=$((CURRENT_STEP + 1)); show_progress "Installing system dependencies"
+    install_dependencies
+
+    CURRENT_STEP=$((CURRENT_STEP + 1)); show_progress "Configuring system limits"
+    configure_system_limits
+
+    CURRENT_STEP=$((CURRENT_STEP + 1)); show_progress "Configuring interfaces"
+    configure_interfaces
+
+    CURRENT_STEP=$((CURRENT_STEP + 1)); show_progress "Configuring USB Gadget"
+    configure_usb_gadget
+}
+
+run_interactive_install() {
+    echo -e "${BLUE}BJORN Installation Options:${NC}"
+    echo "1. Full installation (recommended)"
+    echo "2. Custom installation"
+    read -r -p "Choose an option (1/2): " install_option
+
+    choose_epd_interactive
 
     case $install_option in
         1)
-            CURRENT_STEP=1; show_progress "Checking system compatibility"
-            check_system_compatibility
+            MODE="interactive"
+            TOTAL_STEPS=8
+            CURRENT_STEP=0
 
-            CURRENT_STEP=2; show_progress "Installing system dependencies"
-            install_dependencies
+            run_full_system_stack
 
-            CURRENT_STEP=3; show_progress "Configuring system limits"
-            configure_system_limits
-
-            CURRENT_STEP=4; show_progress "Configuring interfaces"
-            configure_interfaces
-
-            CURRENT_STEP=5; show_progress "Setting up BJORN"
-            setup_bjorn
-
-            CURRENT_STEP=6; show_progress "Configuring USB Gadget"
-            configure_usb_gadget
+            CURRENT_STEP=6; show_progress "Setting up BJORN"
+            backup_shared_config
+            setup_bjorn_app
 
             CURRENT_STEP=7; show_progress "Setting up services"
             setup_services
@@ -580,17 +770,20 @@ main() {
             ;;
         2)
             echo "Custom installation - select components to install:"
-            read -p "Install dependencies? (y/n): " deps
-            read -p "Configure system limits? (y/n): " limits
-            read -p "Configure interfaces? (y/n): " interfaces
-            read -p "Setup BJORN? (y/n): " bjorn
-            read -p "Configure USB Gadget? (y/n): " usb_gadget
-            read -p "Setup services? (y/n): " services
+            read -r -p "Install dependencies? (y/n): " deps
+            read -r -p "Configure system limits? (y/n): " limits
+            read -r -p "Configure interfaces? (y/n): " interfaces
+            read -r -p "Setup BJORN? (y/n): " bjorn
+            read -r -p "Configure USB Gadget? (y/n): " usb_gadget
+            read -r -p "Setup services? (y/n): " services
 
             [ "$deps" = "y" ] && install_dependencies
             [ "$limits" = "y" ] && configure_system_limits
             [ "$interfaces" = "y" ] && configure_interfaces
-            [ "$bjorn" = "y" ] && setup_bjorn
+            if [ "$bjorn" = "y" ]; then
+                backup_shared_config
+                setup_bjorn_app
+            fi
             [ "$usb_gadget" = "y" ] && configure_usb_gadget
             [ "$services" = "y" ] && setup_services
             verify_installation
@@ -600,12 +793,66 @@ main() {
             clean_exit 1
             ;;
     esac
+}
 
-    #removed git files
-    find "$BJORN_PATH" -name ".git*" -exec rm -rf {} +
+run_day2_mode() {
+    TOTAL_STEPS=7
+    CURRENT_STEP=1; show_progress "Stopping BJORN service"
+    stop_bjorn_runtime
 
-    log "SUCCESS" "BJORN installation completed!"
-    log "INFO" "Please reboot your system to apply all changes."
+    CURRENT_STEP=2; show_progress "Backing up shared config"
+    backup_shared_config
+
+    CURRENT_STEP=3; show_progress "Preparing repository"
+    setup_bjorn_app
+
+    if [ "$FULL_SYSTEM" = true ]; then
+        TOTAL_STEPS=11
+        CURRENT_STEP=3
+        run_full_system_stack
+    fi
+
+    CURRENT_STEP=$((TOTAL_STEPS - 1)); show_progress "Setting up services"
+    setup_services
+
+    CURRENT_STEP=$TOTAL_STEPS; show_progress "Verifying installation"
+    verify_installation
+}
+
+prompt_reboot_if_interactive() {
+    if [ "$AUTO_YES" = true ] || [ "$MODE" != "interactive" ]; then
+        log "INFO" "Skipping reboot prompt in non-interactive flow"
+        return 0
+    fi
+
+    if ask_yes_no "Would you like to reboot now?"; then
+        if reboot; then
+            log "INFO" "System reboot initiated."
+        else
+            log "ERROR" "Failed to initiate reboot."
+            clean_exit 1
+        fi
+    else
+        echo -e "${YELLOW}Reboot your system to apply all changes and run Bjorn service.${NC}"
+    fi
+}
+
+# Main installation process
+main() {
+    log "INFO" "Starting BJORN installation..."
+
+    require_root
+    parse_args "$@"
+
+    if [ "$MODE" = "interactive" ]; then
+        run_interactive_install
+    else
+        log "INFO" "Running mode: $MODE"
+        log "INFO" "Repository: $REPO_URL (branch: $BRANCH)"
+        run_day2_mode
+    fi
+
+    log "SUCCESS" "BJORN installation completed"
     echo -e "\n${GREEN}Installation completed successfully!${NC}"
     echo -e "${YELLOW}Important notes:${NC}"
     echo "1. If configuring Windows PC for USB gadget connection:"
@@ -616,21 +863,8 @@ main() {
     echo "2. Web interface will be available at: http://[device-ip]:8000"
     echo "3. Make sure your e-Paper HAT (2.13-inch) is properly connected"
 
-    read -p "Would you like to reboot now? (y/n): " reboot_now
-    if [ "$reboot_now" = "y" ]; then
-        if reboot; then
-            log "INFO" "System reboot initiated."
-        else
-            log "ERROR" "Failed to initiate reboot."
-            exit 1
-        fi
-    else
-        echo -e "${YELLOW}Reboot your system to apply all changes & run Bjorn service.${NC}"
-    fi
+    prompt_reboot_if_interactive
+    clean_exit 0
 }
 
-main
-
-
-
-
+main "$@"

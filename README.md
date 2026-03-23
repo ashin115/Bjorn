@@ -14,7 +14,6 @@
 
 Bjorn is a « Tamagotchi like » sophisticated, autonomous network scanning, vulnerability assessment, and offensive security tool designed to run on a Raspberry Pi equipped with a 2.13-inch e-Paper HAT. This document provides a detailed explanation of the project.
 
-
 ## 📚 Table of Contents
 
 - [Introduction](#-introduction)
@@ -52,11 +51,11 @@ The e-Paper HAT display and web interface make it easy to monitor and interact w
 
 ![image](https://github.com/user-attachments/assets/3980ec5f-a8fc-4848-ab25-4356e0529639)
 
-- Raspberry Pi OS installed. 
-    - Stable:
-      - System: 32-bit
-      - Kernel version: 6.6
-      - Debian version: 12 (bookworm) '2024-10-22-raspios-bookworm-armhf-lite'
+- Raspberry Pi OS installed.
+  - Stable:
+    - System: 32-bit
+    - Kernel version: 6.6
+    - Debian version: 12 (bookworm) '2024-10-22-raspios-bookworm-armhf-lite'
 - Username and hostname set to `bjorn`.
 - 2.13-inch e-Paper HAT connected to GPIO pins.
 
@@ -66,16 +65,15 @@ The e-Paper HAT display and web interface make it easy to monitor and interact w
 
 I did not develop Bjorn for the raspberry pi zero w2 64bits, but several feedbacks have attested that the installation worked perfectly.
 
-- Raspberry Pi OS installed. 
-    - Stable:
-      - System: 64-bit
-      - Kernel version: 6.6
-      - Debian version: 12 (bookworm) '2024-10-22-raspios-bookworm-arm64-lite'
+- Raspberry Pi OS installed.
+  - Stable:
+    - System: 64-bit
+    - Kernel version: 6.6
+    - Debian version: 12 (bookworm) '2024-10-22-raspios-bookworm-arm64-lite'
 - Username and hostname set to `bjorn`.
 - 2.13-inch e-Paper HAT connected to GPIO pins.
 
-
-At the moment the paper screen v2  v4 have been tested and implemented.
+At the moment the paper screen v2 v4 have been tested and implemented.
 I juste hope the V1 & V3 will work the same.
 
 ### 🔨 Installation
@@ -84,9 +82,27 @@ The fastest way to install Bjorn is using the automatic installation script :
 
 ```bash
 # Download and run the installer
-wget https://raw.githubusercontent.com/infinition/Bjorn/refs/heads/main/install_bjorn.sh
+wget https://raw.githubusercontent.com/ashin115/Bjorn/refs/heads/main/install_bjorn.sh
 sudo chmod +x install_bjorn.sh && sudo ./install_bjorn.sh
 # Choose the choice 1 for automatic installation. It may take a while as a lot of packages and modules will be installed. You must reboot at the end.
+```
+
+### 🔄 Update and Reinstall
+
+Day-2 operations are now explicit and safe by default:
+
+```bash
+# Update code and restart service (preserves config/shared_config.json)
+sudo ./install_bjorn.sh --update --yes
+
+# Reinstall code directory with rollback safety (preserves config/shared_config.json)
+sudo ./install_bjorn.sh --reinstall --yes
+
+# Re-run system-level setup only when you really need it
+sudo ./install_bjorn.sh --update --full-system --yes
+
+# Use your fork/branch
+sudo ./install_bjorn.sh --update --repo https://github.com/ashin115/Bjorn.git --branch <branch> --yes
 ```
 
 For **detailed information** about **installation** process go to [Install Guide](INSTALL.md)
@@ -116,7 +132,7 @@ Here's a demonstration of how Bjorn autonomously hunts through your network like
     ├── Ports: 22,80,445,3306
     └── MAC: 00:11:22:33:44:55
 
-# Attack Sequence 
+# Attack Sequence
 [NmapVulnScanner] Found vulnerabilities on 192.168.1.100
     ├── MySQL 5.5 < 5.7 - User Enumeration
     └── SMB - EternalBlue Candidate
@@ -163,7 +179,7 @@ For **detailed information** about **contributing** process go to [Contributing 
   - Document reproduction steps.
   - Provide logs and context.
 
-- **Author**: __infinition__
+- **Author**: **infinition**
 - **GitHub**: [infinition/Bjorn](https://github.com/infinition/Bjorn)
 
 ## 🌠 Stargazers

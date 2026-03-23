@@ -15,13 +15,14 @@ Use Raspberry Pi Imager to install your OS
 https://www.raspberrypi.com/software/
 
 ### 📌 Prerequisites for RPI zero W (32bits)
+
 ![image](https://github.com/user-attachments/assets/3980ec5f-a8fc-4848-ab25-4356e0529639)
 
-- Raspberry Pi OS installed. 
-    - Stable:
-      - System: 32-bit
-      - Kernel version: 6.6
-      - Debian version: 12 (bookworm) '2024-10-22-raspios-bookworm-armhf-lite'
+- Raspberry Pi OS installed.
+  - Stable:
+    - System: 32-bit
+    - Kernel version: 6.6
+    - Debian version: 12 (bookworm) '2024-10-22-raspios-bookworm-armhf-lite'
 - Username and hostname set to `bjorn`.
 - 2.13-inch e-Paper HAT connected to GPIO pins.
 
@@ -31,29 +32,53 @@ https://www.raspberrypi.com/software/
 
 I did not develop Bjorn for the raspberry pi zero w2 64bits, but several feedbacks have attested that the installation worked perfectly.
 
-- Raspberry Pi OS installed. 
-    - Stable:
-      - System: 64-bit
-      - Kernel version: 6.6
-      - Debian version: 12 (bookworm) '2024-10-22-raspios-bookworm-arm64-lite'
+- Raspberry Pi OS installed.
+  - Stable:
+    - System: 64-bit
+    - Kernel version: 6.6
+    - Debian version: 12 (bookworm) '2024-10-22-raspios-bookworm-arm64-lite'
 - Username and hostname set to `bjorn`.
 - 2.13-inch e-Paper HAT connected to GPIO pins.
 
-
-
-At the moment the paper screen v2  v4 have been tested and implemented.
+At the moment the paper screen v2 v4 have been tested and implemented.
 I juste hope the V1 & V3 will work the same.
- 
+
 ### ⚡ Quick Install
 
 The fastest way to install Bjorn is using the automatic installation script :
 
 ```bash
 # Download and run the installer
-wget https://raw.githubusercontent.com/infinition/Bjorn/refs/heads/main/install_bjorn.sh
+wget https://raw.githubusercontent.com/ashin115/Bjorn/refs/heads/main/install_bjorn.sh
 sudo chmod +x install_bjorn.sh
 sudo ./install_bjorn.sh
 # Choose the choice 1 for automatic installation. It may take a while as a lot of packages and modules will be installed. You must reboot at the end.
+```
+
+### 🔄 Update and Reinstall Modes
+
+`install_bjorn.sh` now supports explicit day-2 workflows:
+
+```bash
+# Update existing installation (code refresh + service restart)
+sudo ./install_bjorn.sh --update --yes
+
+# Reinstall Bjorn directory (rollback-safe clone) and keep shared config
+sudo ./install_bjorn.sh --reinstall --yes
+
+# Re-run system-level setup only when explicitly requested
+sudo ./install_bjorn.sh --update --full-system --yes
+```
+
+The installer preserves `config/shared_config.json` automatically in update and reinstall modes.
+
+Optional deployment flags:
+
+```bash
+--repo <url>      # Deploy from fork
+--branch <name>   # Deploy from branch
+--epd <value>     # Override epd_type during install/update/reinstall
+--yes             # Non-interactive execution
 ```
 
 ### 🧰 Manual Install
@@ -112,7 +137,7 @@ sudo nmap --script-updatedb
 ```bash
 # Clone the Bjorn repository
 cd /home/bjorn
-git clone https://github.com/infinition/Bjorn.git
+git clone https://github.com/ashin115/Bjorn.git
 cd Bjorn
 
 # Install Python dependencies within the virtual environment
@@ -121,12 +146,15 @@ sudo pip install -r requirements.txt --break-system-packages
 ```
 
 ##### 3.1: Configure E-Paper Display Type
+
 Choose your e-Paper HAT version by modifying the configuration file:
 
 1. Open the configuration file:
+
 ```bash
 sudo vi /home/bjorn/Bjorn/config/shared_config.json
 ```
+
 Press i to enter insert mode
 Locate the line containing "epd_type":
 Change the value according to your screen model:
@@ -281,8 +309,6 @@ ExecStartPost=/bin/bash -c 'FILE_LIMIT=$(ulimit -n); THRESHOLD=$(( FILE_LIMIT - 
 WantedBy=multi-user.target
 ```
 
-
-
 ##### 7.2: Port 8000 Killer Script
 
 Create the script to free up port 8000:
@@ -309,7 +335,6 @@ Make the script executable:
 ```bash
 chmod +x /home/bjorn/Bjorn/kill_port_8000.sh
 ```
-
 
 ##### 7.3: USB Gadget Configuration
 
@@ -452,6 +477,7 @@ sudo systemctl start usb-gadget
 ```
 
 You must reboot to be able to use it as a USB gadget (with ip)
+
 ###### Windows PC Configuration
 
 Set the static IP address on your Windows PC:
