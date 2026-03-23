@@ -200,6 +200,7 @@ class Display:
                 else:
                     self.manual_mode_txt = "A"
                 self.shared_data.wifi_connected = self.is_wifi_connected()
+                self.shared_data.current_ssid = self.get_current_ssid()
                 self.shared_data.usb_active = self.is_usb_connected()
                 self.get_open_files()
 
@@ -244,6 +245,19 @@ class Display:
         except Exception as e:
             logger.error(f"Error checking WiFi status: {e}")
             return False
+
+    def get_current_ssid(self):
+        """Get currently connected SSID."""
+        try:
+            result = subprocess.Popen(['iwgetid', '-r'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            ssid, error = result.communicate()
+            if result.returncode != 0:
+                logger.error(f"Error executing 'iwgetid -r': {error}")
+                return ""
+            return ssid.strip()
+        except Exception as e:
+            logger.error(f"Error getting current SSID: {e}")
+            return ""
 
     def is_manual_mode(self):
         """Check if the BjornOrch is in manual mode."""
@@ -318,6 +332,11 @@ class Display:
                 image.paste(self.shared_data.bjornstatusimage, (int(3 * self.scale_factor_x), int(60 * self.scale_factor_y)))
                 draw.text((int(35 * self.scale_factor_x), int(65 * self.scale_factor_y)), self.shared_data.bjornstatustext, font=self.shared_data.font_arial9, fill=0)
                 draw.text((int(35 * self.scale_factor_x), int(75 * self.scale_factor_y)), self.shared_data.bjornstatustext2, font=self.shared_data.font_arial9, fill=0)
+                current_ssid = getattr(self.shared_data, 'current_ssid', '')
+                if current_ssid:
+                    max_ssid_len = 12
+                    compact_ssid = current_ssid if len(current_ssid) <= max_ssid_len else f"{current_ssid[:max_ssid_len - 1]}~"
+                    draw.text((int(35 * self.scale_factor_x), int(83 * self.scale_factor_y)), f"WiFi:{compact_ssid}", font=self.shared_data.font_arial9, fill=0)
 
                 # Get frise position based on display type
                 frise_x, frise_y = self.get_frise_position()

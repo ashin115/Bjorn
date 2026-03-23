@@ -20,6 +20,7 @@ import time
 import logging
 import sys
 import threading
+import csv
 from datetime import datetime, timedelta
 from actions.nmap_vuln_scanner import NmapVulnScanner
 from init_shared import shared_data
@@ -40,6 +41,53 @@ class Orchestrator:
         actions_loaded = [action.__class__.__name__ for action in self.actions + self.standalone_actions]  # Get the names of the loaded actions
         logger.info(f"Actions loaded: {actions_loaded}")
         self.semaphore = threading.Semaphore(10)  # Limit the number of active threads to 10
+
+    def _count_vulnerable_hosts(self):
+        """Count hosts with at least one vulnerability entry in the summary file."""
+        summary_file = self.shared_data.vuln_summary_file
+        try:
+            with open(summary_file, 'r', encoding='utf-8') as file:
+                reader = csv.DictReader(file)
+                count = 0
+                for row in reader:
+                    if row.get("Vulnerabilities", "").strip():
+                        count += 1
+                return count
+        except FileNotFoundError:
+            return 0
+        except Exception as e:
+            logger.error(f"Error reading vulnerability summary file: {e}")
+            return 0
+
+    def _trigger_network_switch(self, reason):
+        """Request a network switch and stop orchestrator gracefully."""
+        now_ts = time.time()
+        cooldown = getattr(self.shared_data, 'network_switch_cooldown_seconds', 120)
+        last_switch_ts = getattr(self.shared_data, 'last_network_switch_ts', 0.0)
+        if now_ts - last_switch_ts < cooldown:
+            return False
+
+        self.shared_data.network_switch_requested = True
+        self.shared_data.network_switch_reason = reason
+        self.shared_data.orchestrator_should_exit = True
+        logger.warning(f"Requesting network switch: {reason}")
+        return True
+
+    def _check_network_switch_conditions(self):
+        """Check no-vulnerability and dwell-time based switch conditions."""
+        now_ts = time.time()
+        dwell_start_ts = getattr(self.shared_data, 'network_dwell_start_ts', now_ts)
+        max_dwell = getattr(self.shared_data, 'max_network_dwell_seconds', 3600)
+        if now_ts - dwell_start_ts >= max_dwell:
+            return self._trigger_network_switch("max_network_dwell_reached")
+
+        if getattr(self.shared_data, 'scan_vuln_running', False):
+            last_vuln_found_ts = getattr(self.shared_data, 'last_vuln_found_ts', now_ts)
+            no_vuln_timeout = getattr(self.shared_data, 'no_vuln_switch_timeout_seconds', 1800)
+            if now_ts - last_vuln_found_ts >= no_vuln_timeout:
+                return self._trigger_network_switch("no_vulnerability_found_timeout")
+
+        return False
 
     def load_actions(self):
         """Load all actions from the actions file"""
@@ -309,6 +357,7 @@ class Orchestrator:
                         if current_time >= self.last_vuln_scan_time + timedelta(seconds=self.shared_data.scan_vuln_interval):
                             try:
                                 logger.info("Starting vulnerability scans...")
+                                vuln_count_before = self._count_vulnerable_hosts()
                                 for row in current_data:
                                     if row["Alive"] == '1':
                                         ip = row["IPs"]
@@ -344,6 +393,9 @@ class Orchestrator:
                                             else:
                                                 row["NmapVulnScanner"] = f'failed_{timestamp}'
                                             self.shared_data.write_data(current_data)
+                                vuln_count_after = self._count_vulnerable_hosts()
+                                if vuln_count_after > vuln_count_before:
+                                    self.shared_data.last_vuln_found_ts = time.time()
                                 self.last_vuln_scan_time = current_time
                             except Exception as e:
                                 logger.error(f"Error during vulnerability scan: {e}")
@@ -363,6 +415,8 @@ class Orchestrator:
                     while datetime.now() < idle_end_time:
                         if self.shared_data.orchestrator_should_exit:
                             break
+                        if self._check_network_switch_conditions():
+                            break
                         remaining_time = (idle_end_time - datetime.now()).seconds
                         self.shared_data.bjornorch_status = "IDLE"
                         self.shared_data.bjornstatustext2 = ""
@@ -377,6 +431,9 @@ class Orchestrator:
 
             if action_retry_pending:
                 self.failed_scans_count = 0
+
+            if self._check_network_switch_conditions():
+                break
 
 if __name__ == "__main__":
     orchestrator = Orchestrator()

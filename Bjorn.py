@@ -55,12 +55,25 @@ class Bjorn:
 
     def check_and_start_orchestrator(self):
         """Check Wi-Fi and start the orchestrator if connected."""
+        if self.shared_data.network_switch_requested:
+            if self.orchestrator_thread is not None and self.orchestrator_thread.is_alive():
+                self.shared_data.orchestrator_should_exit = True
+                self.orchestrator_thread.join(timeout=2)
+                if self.orchestrator_thread.is_alive():
+                    return
+            self.switch_to_best_open_network(self.shared_data.network_switch_reason)
+            self.shared_data.network_switch_requested = False
+            self.shared_data.network_switch_reason = ""
+
         if self.is_wifi_connected():
             self.wifi_connected = True
             if self.orchestrator_thread is None or not self.orchestrator_thread.is_alive():
                 self.start_orchestrator()
         else:
             self.wifi_connected = False
+            if getattr(self.shared_data, 'auto_connect_open_networks', True):
+                if self.switch_to_best_open_network("auto_connect_when_disconnected"):
+                    return
             logger.info("Waiting for Wi-Fi connection to start Orchestrator...")
 
     def start_orchestrator(self):
@@ -100,6 +113,95 @@ class Bjorn:
         result = subprocess.Popen(['nmcli', '-t', '-f', 'active', 'dev', 'wifi'], stdout=subprocess.PIPE, text=True).communicate()[0]
         self.wifi_connected = 'yes' in result
         return self.wifi_connected
+
+    def get_current_ssid(self):
+        """Return current SSID or empty string if disconnected."""
+        try:
+            result = subprocess.run(['iwgetid', '-r'], capture_output=True, text=True)
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except Exception as e:
+            logger.error(f"Could not get current SSID: {e}")
+        return ""
+
+    def scan_open_networks(self):
+        """Return open networks sorted by signal descending."""
+        open_networks = []
+        try:
+            result = subprocess.run(
+                ['nmcli', '-t', '-f', 'SSID,SECURITY,SIGNAL', 'dev', 'wifi', 'list'],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode != 0:
+                logger.warning(f"Could not scan Wi-Fi networks: {result.stderr.strip()}")
+                return open_networks
+
+            for raw_line in result.stdout.splitlines():
+                if not raw_line.strip():
+                    continue
+
+                parts = raw_line.rsplit(':', 2)
+                if len(parts) != 3:
+                    continue
+
+                ssid, security, signal = parts[0].strip(), parts[1].strip(), parts[2].strip()
+                if not ssid:
+                    continue
+
+                if security:
+                    continue
+
+                try:
+                    signal_strength = int(signal)
+                except ValueError:
+                    signal_strength = 0
+
+                open_networks.append({"ssid": ssid, "signal": signal_strength})
+
+            open_networks.sort(key=lambda item: item["signal"], reverse=True)
+            return open_networks
+        except Exception as e:
+            logger.error(f"Error while scanning open networks: {e}")
+            return open_networks
+
+    def connect_open_network(self, ssid):
+        """Connect to an open network by SSID."""
+        try:
+            command = ['sudo', 'nmcli', 'device', 'wifi', 'connect', ssid]
+            result = subprocess.run(command, capture_output=True, text=True)
+            if result.returncode != 0:
+                logger.warning(f"Failed to connect to open network {ssid}: {result.stderr.strip()}")
+                return False
+
+            self.shared_data.wifichanged = True
+            self.shared_data.current_ssid = ssid
+            self.shared_data.network_dwell_start_ts = time.time()
+            self.shared_data.last_network_switch_ts = time.time()
+            self.shared_data.last_auto_connected_ssid = ssid
+            logger.info(f"Connected to open network: {ssid}")
+            return True
+        except Exception as e:
+            logger.error(f"Error connecting to open network {ssid}: {e}")
+            return False
+
+    def switch_to_best_open_network(self, reason):
+        """Switch network using strongest available open SSID."""
+        current_ssid = self.get_current_ssid()
+        self.shared_data.current_ssid = current_ssid
+        logger.info(f"Network switch attempt, reason={reason}, current_ssid={current_ssid}")
+
+        candidates = [n for n in self.scan_open_networks() if n["ssid"] != current_ssid]
+        if not candidates:
+            logger.warning("No alternative open network available for auto-switch")
+            return False
+
+        for network in candidates:
+            if self.connect_open_network(network["ssid"]):
+                return True
+
+        logger.warning("Could not connect to any discovered open network")
+        return False
 
     
     @staticmethod

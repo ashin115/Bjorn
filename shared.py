@@ -140,6 +140,10 @@ class SharedData:
             "scan_vuln_interval": 900,
             "failed_retry_delay": 600,
             "success_retry_delay": 900, 
+            "auto_connect_open_networks": True,
+            "no_vuln_switch_timeout_seconds": 1800,
+            "max_network_dwell_seconds": 3600,
+            "network_switch_cooldown_seconds": 120,
             "ref_width" :122 ,
             "ref_height" : 250,
             "epd_type": "epd2in13_V4",
@@ -304,6 +308,13 @@ class SharedData:
         self.networkkbnbr = 0
         self.attacksnbr = 0
         self.show_first_image = True
+        self.network_switch_requested = False
+        self.network_switch_reason = ""
+        self.current_ssid = ""
+        self.network_dwell_start_ts = time.time()
+        self.last_vuln_found_ts = time.time()
+        self.last_network_switch_ts = 0.0
+        self.last_auto_connected_ssid = ""
 
     def delete_webconsolelog(self):
             """Delete the web console log file."""
